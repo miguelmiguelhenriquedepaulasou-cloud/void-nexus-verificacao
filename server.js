@@ -100,19 +100,39 @@ app.get('/auth/callback', async (req, res) => {
     if (!userResponse.ok) throw new Error('Não foi possível confirmar sua conta Discord.');
     const user = await userResponse.json();
 
-    // Só atribui o cargo a quem já pertence ao servidor.
+    // Confere a presença do membro e a capacidade real do bot antes de tentar aplicar o cargo.
+    let member;
     try {
-      await discordApi(`/guilds/${GUILD_ID}/members/${user.id}`);
+      member = await discordApi(`/guilds/${GUILD_ID}/members/${user.id}`);
     } catch (e) {
       if (e.status === 404) return res.status(403).send(page('Entre no servidor primeiro', 'Você precisa entrar no servidor Void Nexus antes de concluir a verificação.', true));
       throw e;
+    }
+
+    // Diagnóstico explícito para os erros mais comuns: cargo inexistente, bot sem Gerenciar Cargos
+    // ou cargo de verificação acima do cargo mais alto do bot.
+    const [guildRoles, botMember] = await Promise.all([
+      discordApi(`/guilds/${GUILD_ID}/roles`),
+      discordApi(`/guilds/${GUILD_ID}/members/@me`)
+    ]);
+    const targetRole = guildRoles.find(role => role.id === VERIFIED_ROLE_ID);
+    if (!targetRole) throw new Error('VERIFIED_ROLE_ID não corresponde a um cargo existente no servidor.');
+    const botRoleIds = botMember.roles || [];
+    const botHighest = guildRoles.filter(role => botRoleIds.includes(role.id)).sort((a, b) => b.position - a.position)[0];
+    const permissions = BigInt(botMember.permissions || '0');
+    const MANAGE_ROLES = 1n << 28n;
+    if ((permissions & MANAGE_ROLES) !== MANAGE_ROLES) throw new Error('O bot não tem a permissão Gerenciar Cargos no servidor.');
+    if (!botHighest || botHighest.position <= targetRole.position) throw new Error('O cargo do bot precisa ficar acima do cargo de membro verificado na lista de cargos do Discord.');
+    if ((member.roles || []).includes(VERIFIED_ROLE_ID)) {
+      req.session.verifiedName = user.global_name || user.username || 'membro';
+      return res.send(page('Você já está verificado!', `Tudo certo, ${escapeHtml(req.session.verifiedName)}. Seu cargo de membro verificado já está ativo.`, false));
     }
     await discordApi(`/guilds/${GUILD_ID}/members/${user.id}/roles/${VERIFIED_ROLE_ID}`, { method: 'PUT' });
     req.session.verifiedName = user.global_name || user.username || 'membro';
     return res.send(page('Verificação concluída!', `Tudo certo, ${escapeHtml(req.session.verifiedName)}. O cargo de membro verificado foi aplicado. Se os canais não aparecerem imediatamente, aguarde alguns segundos e reabra o Discord.`, false));
   } catch (e) {
     console.error('Erro de verificação:', e.message);
-    return res.status(500).send(page('Erro na verificação', 'Não foi possível concluir agora. Avise a equipe do Void Nexus. Se você administra o bot, confira as variáveis do .env e se o bot tem a permissão Gerenciar Cargos.', true));
+    return res.status(500).send(page('Erro na verificação', 'Não foi possível concluir agora. A equipe deve conferir os registros da hospedagem, o token do bot, a permissão Gerenciar Cargos e se o cargo de verificação está abaixo do cargo do bot.', true));
   }
 });
 
