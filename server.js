@@ -111,17 +111,24 @@ app.get('/auth/callback', async (req, res) => {
 
     // Diagnóstico explícito para os erros mais comuns: cargo inexistente, bot sem Gerenciar Cargos
     // ou cargo de verificação acima do cargo mais alto do bot.
-    const [guildRoles, botMember] = await Promise.all([
+    // A API não inclui `permissions` no objeto Guild Member. Buscamos o usuário do
+    // próprio bot e calculamos as permissões a partir dos cargos do servidor.
+    const [guildRoles, botUser] = await Promise.all([
       discordApi(`/guilds/${GUILD_ID}/roles`),
-      discordApi(`/guilds/${GUILD_ID}/members/@me`)
+      discordApi('/users/@me')
     ]);
+    const botMember = await discordApi(`/guilds/${GUILD_ID}/members/${botUser.id}`);
     const targetRole = guildRoles.find(role => role.id === VERIFIED_ROLE_ID);
     if (!targetRole) throw new Error('VERIFIED_ROLE_ID não corresponde a um cargo existente no servidor.');
-    const botRoleIds = botMember.roles || [];
-    const botHighest = guildRoles.filter(role => botRoleIds.includes(role.id)).sort((a, b) => b.position - a.position)[0];
-    const permissions = BigInt(botMember.permissions || '0');
+    const botRoleIds = new Set([GUILD_ID, ...(botMember.roles || [])]);
+    const botRoles = guildRoles.filter(role => botRoleIds.has(role.id));
+    const botHighest = botRoles.sort((a, b) => b.position - a.position)[0];
+    const permissions = botRoles.reduce((bits, role) => bits | BigInt(role.permissions || '0'), 0n);
+    const ADMINISTRATOR = 1n << 3n;
     const MANAGE_ROLES = 1n << 28n;
-    if ((permissions & MANAGE_ROLES) !== MANAGE_ROLES) throw new Error('O bot não tem a permissão Gerenciar Cargos no servidor.');
+    if ((permissions & ADMINISTRATOR) !== ADMINISTRATOR && (permissions & MANAGE_ROLES) !== MANAGE_ROLES) {
+      throw new Error('O bot não tem a permissão Gerenciar Cargos no servidor.');
+    }
     if (!botHighest || botHighest.position <= targetRole.position) throw new Error('O cargo do bot precisa ficar acima do cargo de membro verificado na lista de cargos do Discord.');
     if ((member.roles || []).includes(VERIFIED_ROLE_ID)) {
       req.session.verifiedName = user.global_name || user.username || 'membro';
